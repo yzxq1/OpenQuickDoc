@@ -3,8 +3,20 @@ import Foundation
 /// 新建文件的纯逻辑，与 Finder / UI 无关，便于单元测试。
 public enum FileFactory {
 
-    public enum CreateError: Error {
+    public enum CreateError: LocalizedError {
         case noAvailableName
+        case invalidTemplate
+        case missingBundledTemplate
+        case invalidDefinition
+
+        public var errorDescription: String? {
+            switch self {
+            case .noAvailableName: return "没有可用的文件名。"
+            case .invalidTemplate: return "模板必须是普通文件，不能是文件夹或符号链接。"
+            case .missingBundledTemplate: return "缺少内置 Office 模板，请重新安装应用。"
+            case .invalidDefinition: return "文件名或扩展名无效。"
+            }
+        }
     }
 
     /// 生成不重名的目标路径（沿用原版规则）：
@@ -18,7 +30,8 @@ public enum FileFactory {
         }
         for n in 1..<1000 {
             let url = dir.appendingPathComponent(name(n))
-            if !fm.fileExists(atPath: url.path) { return url }
+            if !fm.fileExists(atPath: url.path),
+               (try? fm.destinationOfSymbolicLink(atPath: url.path)) == nil { return url }
         }
         return nil
     }
@@ -86,16 +99,25 @@ public enum FileFactory {
                               templatesDir: URL = SharedPaths.templates,
                               bundle: Bundle = .main,
                               fileManager fm: FileManager = .default) throws -> URL {
+        guard !def.title.isEmpty, def.title != ".", def.title != "..",
+              !def.title.contains("/"), !def.title.contains(":"),
+              !def.title.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+              def.ext.isEmpty || FileItemDefinition.sanitizeExtension(def.ext) == def.ext else {
+            throw CreateError.invalidDefinition
+        }
         guard let target = uniqueURL(for: def, in: dir, fileManager: fm) else {
             throw CreateError.noAvailableName
         }
 
         let userTemplate = templatesDir.appendingPathComponent(def.ext.isEmpty ? "blank" : "template.\(def.ext)")
-        if fm.fileExists(atPath: userTemplate.path) {
-            try fm.copyItem(at: userTemplate, to: target)
-        } else if let name = def.bundledTemplate,
-                  let path = bundle.path(forResource: name, ofType: nil) {
-            try fm.copyItem(atPath: path, toPath: target.path)
+        if fm.fileExists(atPath: userTemplate.path) ||
+            (try? fm.destinationOfSymbolicLink(atPath: userTemplate.path)) != nil {
+            try copyRegularTemplate(userTemplate, to: target, fileManager: fm)
+        } else if let name = def.bundledTemplate {
+            guard let path = bundle.path(forResource: name, ofType: nil) else {
+                throw CreateError.missingBundledTemplate
+            }
+            try copyRegularTemplate(URL(fileURLWithPath: path), to: target, fileManager: fm)
         } else {
             // withoutOverwriting：极端并发下也不会覆盖已有文件
             try defaultContent(for: def).write(to: target, options: .withoutOverwriting)
@@ -105,5 +127,15 @@ public enum FileFactory {
             try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
         }
         return target
+    }
+
+    private static func copyRegularTemplate(_ source: URL, to target: URL,
+                                            fileManager fm: FileManager) throws {
+        let attributes = try fm.attributesOfItem(atPath: source.path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular else {
+            throw CreateError.invalidTemplate
+        }
+        // 写入字节而不是复制链接；目标已存在时失败，绝不覆盖已有文件。
+        try Data(contentsOf: source).write(to: target, options: .withoutOverwriting)
     }
 }

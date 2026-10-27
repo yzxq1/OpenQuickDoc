@@ -3,8 +3,9 @@ import AppKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
-    /// 是否只是被扩展唤起来执行一次“在终端中打开”（这种情况下不显示窗口，执行完就退出）
+    /// 是否由终端 URL 请求唤起；仅这种情况下执行后退出。
     private var launchedForURL = false
+    private var receivedURL = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSAppleEventManager.shared().setEventHandler(
@@ -17,12 +18,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !FileManager.default.fileExists(atPath: SharedPaths.settingsFile.path) {
             AppSettings.defaults.save()
         }
-        // 通过 URL 启动时 launchIsDefaultLaunchKey 为 false
-        let isDefaultLaunch = (notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? Bool) ?? true
-        if isDefaultLaunch {
-            showSettingsWindow()
-        } else {
-            launchedForURL = true
+        // launchIsDefaultLaunchKey=false 也可能是 open -n 等普通启动，
+        // 不能仅据此进入无窗口模式。等待实际 URL 事件决定启动方式。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            if !self.receivedURL { self.showSettingsWindow() }
         }
     }
 
@@ -51,15 +50,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - openquickdoc://open-terminal?app=…&path=…
 
     @objc private func handleGetURL(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
-        guard let s = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
-              let url = URL(string: s), let request = TerminalRequest(url: url) else { return }
-        TerminalLauncher.run(request)
-        if launchedForURL {
-            // 给 AppleScript / 弹窗留出时间后退出，不在 Dock 里常驻
+        receivedURL = true
+        if window == nil { launchedForURL = true }
+        // URL 事件可能先于 didFinishLaunching 到达；延后检查启动状态，
+        // 无效请求也必须清理无窗口的临时进程。
+        defer {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                 if self.launchedForURL { NSApp.terminate(nil) }
             }
         }
+        guard let s = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
+              let url = URL(string: s), let request = TerminalRequest(url: url) else { return }
+        TerminalLauncher.run(request)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -67,7 +69,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 enum TerminalLauncher {
     static func run(_ request: TerminalRequest) {
+        var isDirectory: ObjCBool = false
+        guard TerminalRequest.isSafePath(request.path),
+              FileManager.default.fileExists(atPath: request.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else { return }
         let dir = URL(fileURLWithPath: request.path)
+
+        // 自定义 URL scheme 可由网页或其他应用调用，不能据此认定来自 Finder。
+        // 每次明确确认后才向终端发送命令；默认按钮为取消。
+        let confirm = NSAlert()
+        confirm.messageText = "在 \(request.terminal.rawValue) 中打开文件夹？"
+        confirm.informativeText = "目标：\(request.path)\n\n仅当这是你刚刚发起的操作时才继续。外部链接也能发起此请求。"
+        confirm.addButton(withTitle: "取消")
+        confirm.addButton(withTitle: "打开")
+        NSApp.activate(ignoringOtherApps: true)
+        guard confirm.runModal() == .alertSecondButtonReturn else { return }
+
         guard let script = request.appleScript else {
             // Warp / Ghostty：直接把文件夹交给应用
             if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: request.terminal.bundleIdentifier) {

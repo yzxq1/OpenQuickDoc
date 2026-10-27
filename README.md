@@ -4,6 +4,8 @@ macOS 访达（Finder）原生右键增强工具：快速新建各种文件、�
 
 纯 Swift + SwiftUI + FinderSync 原生实现，无 Electron，无驻留后台守护进程，内存占用极小。
 
+![OpenQuickDoc 设置窗口](docs/screenshot-settings.png)
+
 ## 功能特性
 
 - **右键快速新建**：TXT、Markdown、Word（.docx）、Excel（.xlsx）、PowerPoint（.pptx）、Python、Shell、JSON、CSV、HTML、RTF、空白文件
@@ -18,6 +20,13 @@ macOS 访达（Finder）原生右键增强工具：快速新建各种文件、�
   - 复制当前路径
 - **右键二级菜单折叠**：可一键收纳进「新建文件 ›」，保持访达主菜单清爽
 - **原生 SF Symbols 矢量图标**：完美自适应浅色/深色模式，高清不发虚
+
+## 隐私与安全
+
+- 不联网、不上传文件，也不收集遥测数据。
+- 诊断日志默认关闭；如需排查问题，显式设置 `OPENQUICKDOC_DIAGNOSTICS=1` 后启动，日志不记录路径、文件名或错误详情。
+- 自定义 URL Scheme 仅接受严格格式的本地绝对目录；收到外部请求时会先显示确认框，默认取消。
+- 发布构建不包含 `get-task-allow` 调试权限。
 
 ## 构建与运行
 

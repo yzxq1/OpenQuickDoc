@@ -12,12 +12,14 @@ private enum Tag {
 final class FinderSync: FIFinderSync {
 
     private let bundle = Bundle(for: FinderSync.self)
+    // tag 在扩展进程内保持稳定，不依赖点击时可能已改变的设置数组下标。
+    private var customMenuRegistry = CustomMenuRegistry(startTag: Tag.custom)
 
     override init() {
         super.init()
         let dirs = Self.monitoredDirectories()
         FIFinderSyncController.default().directoryURLs = Set(dirs)
-        DiagnosticLog.write("扩展已加载，监控: \(dirs.map(\.path).joined(separator: ", "))")
+        DiagnosticLog.write("扩展已加载")
     }
 
     /// "/" 覆盖本机与外接卷；iCloud Drive 在 Finder 中是独立的位置，需要显式加入（原版同样如此）
@@ -49,8 +51,9 @@ final class FinderSync: FIFinderSync {
             guard let i = FileItemDefinition.all.firstIndex(of: def) else { continue }
             fileItems.append(makeItem(def.title, #selector(createFile(_:)), image: symbol(def.symbol), tag: Tag.builtin + i))
         }
-        for (i, def) in settings.customDefinitions.enumerated() {
-            fileItems.append(makeItem(def.title, #selector(createFile(_:)), image: symbol(def.symbol), tag: Tag.custom + i))
+        for def in settings.customDefinitions {
+            fileItems.append(makeItem(def.title, #selector(createFile(_:)), image: symbol(def.symbol),
+                                      tag: customMenuRegistry.tag(for: def)))
         }
 
         if settings.useSubmenu {
@@ -148,17 +151,18 @@ final class FinderSync: FIFinderSync {
     // MARK: - 动作
 
     @objc private func createFile(_ sender: NSMenuItem) {
-        DiagnosticLog.write("点击菜单 tag=\(sender.tag) title=\(sender.title)")
+        DiagnosticLog.write("点击新建菜单")
         let settings = AppSettings.load()
         let def: FileItemDefinition
         switch sender.tag {
         case Tag.builtin..<(Tag.builtin + FileItemDefinition.all.count):
             def = FileItemDefinition.all[sender.tag - Tag.builtin]
-        case Tag.custom..<(Tag.custom + settings.customDefinitions.count):
-            def = settings.customDefinitions[sender.tag - Tag.custom]
         default:
-            DiagnosticLog.write("未知 tag: \(sender.tag)")
-            return
+            guard let custom = customMenuRegistry.definition(for: sender.tag) else {
+                DiagnosticLog.write("未知菜单项")
+                return
+            }
+            def = custom
         }
         guard let dir = creationDirectory else {
             DiagnosticLog.write("无法确定目标文件夹")
@@ -167,14 +171,14 @@ final class FinderSync: FIFinderSync {
         }
         do {
             let url = try FileFactory.create(def, in: dir, bundle: bundle)
-            DiagnosticLog.write("已创建: \(url.path)")
+            DiagnosticLog.write("已创建文件")
             if settings.openFileAfterCreation {
                 NSWorkspace.shared.open(url)
             } else {
                 NSWorkspace.shared.activateFileViewerSelecting([url])
             }
         } catch {
-            DiagnosticLog.write("创建失败 \(dir.path): \(error.localizedDescription)")
+            DiagnosticLog.write("创建文件失败")
             showAlert("创建文件失败：", detail: "\(dir.path)\n\n\(error.localizedDescription)")
         }
     }
@@ -183,7 +187,7 @@ final class FinderSync: FIFinderSync {
         let i = sender.tag - Tag.editor
         guard EditorTarget.allCases.indices.contains(i) else { return }
         let editor = EditorTarget.allCases[i]
-        DiagnosticLog.write("\(editor.title): \(selectedOrCurrent.map(\.path))")
+        DiagnosticLog.write("请求在编辑器中打开")
         open(selectedOrCurrent, withAnyOf: editor.bundleIdentifiers, appName: editor.title)
     }
 
@@ -191,7 +195,7 @@ final class FinderSync: FIFinderSync {
         let terminal = AppSettings.load().selectedTerminal
         // 终端只接受目录：选中文件时取其所在目录
         guard let dir = selectedOrCurrent.first.map({ isDirectory($0) ? $0 : $0.deletingLastPathComponent() }) else { return }
-        DiagnosticLog.write("在 \(terminal.rawValue) 中打开: \(dir.path)")
+        DiagnosticLog.write("请求在终端中打开")
         // 终端收到文件夹不会 cd 过去（实测 iTerm2 只开在主目录），需要 AppleScript；
         // 沙盒里不能发 Apple Events，所以交给主程序执行（见 TerminalRequest）。
         guard let url = TerminalRequest(terminal: terminal, path: dir.path).url else { return }
@@ -199,7 +203,7 @@ final class FinderSync: FIFinderSync {
         config.activates = false
         NSWorkspace.shared.open(url, configuration: config) { _, error in
             if let error {
-                DiagnosticLog.write("唤起主程序失败: \(error.localizedDescription)")
+                DiagnosticLog.write("唤起主程序失败")
                 self.showAlert("唤起 OpenQuickDoc 失败：", detail: error.localizedDescription)
             }
         }
@@ -211,18 +215,18 @@ final class FinderSync: FIFinderSync {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(paths.joined(separator: "\n"), forType: .string)
-        DiagnosticLog.write("已复制路径: \(paths.joined(separator: " | "))")
+        DiagnosticLog.write("已复制路径")
     }
 
     private func open(_ urls: [URL], withAnyOf bundleIDs: [String], appName: String) {
         guard !urls.isEmpty else { return }
         guard let app = appURL(bundleIDs) else {
-            DiagnosticLog.write("未安装: \(bundleIDs)")
+            DiagnosticLog.write("目标应用未安装")
             showAlert("未找到应用", detail: "\(appName) 似乎没有安装。")
             return
         }
         NSWorkspace.shared.open(urls, withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration()) { _, error in
-            if let error { DiagnosticLog.write("打开失败: \(error.localizedDescription)") }
+            if error != nil { DiagnosticLog.write("打开失败") }
         }
     }
 
@@ -237,24 +241,34 @@ final class FinderSync: FIFinderSync {
     }
 }
 
-/// 诊断日志：~/Library/Application Support/OpenQuickDoc/finder-sync.log（超过 512KB 自动截断）
+/// 诊断日志默认关闭；调试时显式设置 OPENQUICKDOC_DIAGNOSTICS=1。
+/// 不记录路径/文件名/错误详情，不删除或截断已有日志。
 enum DiagnosticLog {
     private static let queue = DispatchQueue(label: "oqd.log")
     private static let formatter = ISO8601DateFormatter()
 
     static func write(_ message: String) {
+        guard ProcessInfo.processInfo.environment["OPENQUICKDOC_DIAGNOSTICS"] == "1" else { return }
         queue.async {
             let url = SharedPaths.appSupport.appendingPathComponent("finder-sync.log")
             try? FileManager.default.createDirectory(at: SharedPaths.appSupport, withIntermediateDirectories: true)
             if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 512_000 {
-                try? FileManager.default.removeItem(at: url)
+                return
             }
             let line = Data("[\(formatter.string(from: Date()))] \(message)\n".utf8)
-            if let h = try? FileHandle(forWritingTo: url) {
-                h.seekToEndOfFile(); h.write(line); try? h.close()
-            } else {
-                try? line.write(to: url)
+            let fm = FileManager.default
+            if !fm.fileExists(atPath: url.path) {
+                // 原子排他创建，避免覆盖并发写入或跟随符号链接。
+                let fd = Darwin.open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+                if fd >= 0 { Darwin.close(fd) }
             }
+            let fd = Darwin.open(url.path, O_WRONLY | O_APPEND | O_NOFOLLOW | O_NONBLOCK)
+            guard fd >= 0 else { return }
+            defer { Darwin.close(fd) }
+            var info = stat()
+            guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return }
+            guard fchmod(fd, 0o600) == 0 else { return }
+            _ = line.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, $0.count) }
         }
     }
 }

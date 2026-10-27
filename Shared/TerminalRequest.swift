@@ -17,7 +17,15 @@ public struct TerminalRequest: Equatable {
         self.path = path
     }
 
+    /// 终端会把文本作为按键输入；拒绝换行、ESC 等控制字符，避免改变命令边界。
+    public static func isSafePath(_ path: String) -> Bool {
+        path.hasPrefix("/") && !path.unicodeScalars.contains {
+            CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0)
+        }
+    }
+
     public var url: URL? {
+        guard Self.isSafePath(path) else { return nil }
         var c = URLComponents()
         c.scheme = Self.scheme
         c.host = Self.host
@@ -31,11 +39,16 @@ public struct TerminalRequest: Equatable {
     public init?(url: URL) {
         guard let c = URLComponents(url: url, resolvingAgainstBaseURL: false),
               c.scheme == Self.scheme, c.host == Self.host,
-              let items = c.queryItems,
-              let path = items.first(where: { $0.name == "path" })?.value, path.hasPrefix("/"),
-              let app = items.first(where: { $0.name == "app" })?.value
+              c.user == nil, c.password == nil, c.port == nil,
+              c.path.isEmpty, c.fragment == nil,
+              let items = c.queryItems, items.count == 2,
+              items.filter({ $0.name == "path" }).count == 1,
+              items.filter({ $0.name == "app" }).count == 1,
+              let path = items.first(where: { $0.name == "path" })?.value, Self.isSafePath(path),
+              let app = items.first(where: { $0.name == "app" })?.value,
+              let terminal = TerminalType.allCases.first(where: { $0.bundleIdentifier == app })
         else { return nil }
-        self.terminal = TerminalType.allCases.first { $0.bundleIdentifier == app } ?? .terminal
+        self.terminal = terminal
         self.path = path
     }
 
@@ -46,6 +59,7 @@ public struct TerminalRequest: Equatable {
 
     /// 需要 AppleScript 的终端返回脚本；可直接用“打开文件夹”方式处理的返回 nil
     public var appleScript: String? {
+        guard Self.isSafePath(path) else { return nil }
         let p = Self.appleScriptLiteral(path)
         switch terminal {
         case .iterm2:

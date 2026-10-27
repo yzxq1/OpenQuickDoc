@@ -4,7 +4,9 @@ import Foundation
 // 运行：./test.sh
 
 var failures = 0
+var assertions = 0
 func check(_ cond: @autoclosure () -> Bool, _ msg: String, line: Int = #line) {
+    assertions += 1
     if cond() { print("  ✅ \(msg)") } else { print("  ❌ \(msg)  (line \(line))"); failures += 1 }
 }
 
@@ -17,7 +19,7 @@ let resources = URL(fileURLWithPath: CommandLine.arguments[1])  // Resources 目
 let emptyTemplates = tmp.appendingPathComponent("no-templates")
 
 print("① 沙盒路径：配置必须落在真实家目录，而不是容器目录")
-check(!SharedPaths.settingsFile.path.contains("/Library/Containers/"), "settingsFile = \(SharedPaths.settingsFile.path)")
+check(!SharedPaths.settingsFile.path.contains("/Library/Containers/"), "settingsFile 不使用沙盒容器路径")
 check(SharedPaths.realHome.path == NSHomeDirectoryForUser(NSUserName()), "realHome 与系统记录一致")
 
 print("② 旧版配置兼容：缺字段 / 未知终端值 不应导致整份配置被重置")
@@ -114,5 +116,96 @@ var compileErr: NSDictionary?
 check(NSAppleScript(source: script)!.compileAndReturnError(&compileErr) && compileErr == nil, "iTerm2 AppleScript 可编译")
 check(script.contains(#"\"Docs\""#), "路径中的引号已转义")
 
+print("⑨ 拒绝无效或有歧义的终端 URL")
+let validURL = "openquickdoc://open-terminal?app=com.apple.Terminal&path=/tmp"
+check(TerminalRequest(url: URL(string: validURL)!) != nil, "允许标准终端 URL")
+let invalidURLs = [
+    "openquickdoc://open-terminal?app=unknown&path=/tmp",
+    validURL + "&app=com.googlecode.iterm2",
+    validURL + "&path=/other",
+    validURL + "&extra=1",
+    validURL + "#fragment",
+    "openquickdoc://user@open-terminal?app=com.apple.Terminal&path=/tmp",
+    "openquickdoc://user:password@open-terminal?app=com.apple.Terminal&path=/tmp",
+    "openquickdoc://open-terminal:123?app=com.apple.Terminal&path=/tmp",
+    "openquickdoc://open-terminal/extra?app=com.apple.Terminal&path=/tmp",
+    "openquickdoc://open-terminal?app=com.apple.Terminal&path=",
+    "openquickdoc://open-terminal?app=com.apple.Terminal",
+    "openquickdoc://open-terminal?path=/tmp",
+    "openquickdoc://open-terminal?app=com.apple.Terminal&path=relative",
+]
+for (i, rawURL) in invalidURLs.enumerated() {
+    check(TerminalRequest(url: URL(string: rawURL)!) == nil, "拒绝非法 URL #\(i + 1)")
+}
+for scalar in [UInt32(0), 3, 9, 10, 13, 27, 127, 133, 0x2028, 0x2029] {
+    let path = "/tmp/" + String(UnicodeScalar(scalar)!) + "example"
+    let request = TerminalRequest(terminal: .iterm2, path: path)
+    check(request.url == nil && request.appleScript == nil, "拒绝控制字符 U+\(String(scalar, radix: 16))")
+    var parts = URLComponents(string: validURL)!
+    parts.queryItems = [URLQueryItem(name: "app", value: "com.apple.Terminal"), URLQueryItem(name: "path", value: path)]
+    check(TerminalRequest(url: parts.url!) == nil, "拒绝 URL 编码控制字符 U+\(String(scalar, radix: 16))")
+}
+for terminal in [TerminalType.terminal, .iterm2] {
+    let request = TerminalRequest(terminal: terminal, path: "/tmp/it's \\\"中文\\\" \\u{005C} $example; & (demo)")
+    check(request.url.flatMap(TerminalRequest.init(url:)) == request, "\(terminal): 合法标点路径往返")
+    var error: NSDictionary?
+    check(NSAppleScript(source: request.appleScript!)!.compileAndReturnError(&error), "\(terminal): 合法标点脚本可编译")
+}
+
+print("⑩ 模板安全与缺失处理")
+func expectCreateError(_ expected: FileFactory.CreateError, _ body: () throws -> URL, _ message: String) {
+    do {
+        _ = try body()
+        check(false, message)
+    } catch let error as FileFactory.CreateError {
+        check(String(describing: error) == String(describing: expected), message)
+    } catch { check(false, message + "（非预期错误）") }
+}
+let unsafeTemplates = tmp.appendingPathComponent("unsafe-templates")
+try! fm.createDirectory(at: unsafeTemplates, withIntermediateDirectories: true)
+let unsafeTemplate = unsafeTemplates.appendingPathComponent("template.md")
+let original = tmp.appendingPathComponent("original.md")
+try! Data("ORIGINAL".utf8).write(to: original)
+try! fm.createSymbolicLink(at: unsafeTemplate, withDestinationURL: original)
+expectCreateError(.invalidTemplate, { try FileFactory.create(md, in: tmp, templatesDir: unsafeTemplates) }, "拒绝符号链接模板")
+check((try! String(contentsOf: original, encoding: .utf8)) == "ORIGINAL", "原始文件不受影响")
+try! fm.removeItem(at: unsafeTemplate)
+try! fm.createSymbolicLink(atPath: unsafeTemplate.path, withDestinationPath: tmp.appendingPathComponent("missing-target").path)
+expectCreateError(.invalidTemplate, { try FileFactory.create(md, in: tmp, templatesDir: unsafeTemplates) }, "拒绝悬空符号链接模板")
+try! fm.removeItem(at: unsafeTemplate)
+try! fm.createDirectory(at: unsafeTemplate, withIntermediateDirectories: true)
+expectCreateError(.invalidTemplate, { try FileFactory.create(md, in: tmp, templatesDir: unsafeTemplates) }, "拒绝目录模板")
+for id in ["docx", "xlsx", "pptx"] {
+    let dir = tmp.appendingPathComponent("missing-\(id)")
+    try! fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    expectCreateError(.missingBundledTemplate, {
+        try FileFactory.create(FileItemDefinition.find(id)!, in: dir, templatesDir: emptyTemplates, bundle: .main)
+    }, "\(id): 模板缺失时明确失败")
+    check((try! fm.contentsOfDirectory(atPath: dir.path)).isEmpty, "\(id): 不生成损坏空文件")
+}
+let danglingDir = tmp.appendingPathComponent("dangling-output")
+try! fm.createDirectory(at: danglingDir, withIntermediateDirectories: true)
+let dangling = danglingDir.appendingPathComponent("新建 Markdown 文件.md")
+try! fm.createSymbolicLink(atPath: dangling.path, withDestinationPath: danglingDir.appendingPathComponent("absent").path)
+let afterDangling = try! FileFactory.create(md, in: danglingDir, templatesDir: emptyTemplates)
+check(afterDangling.lastPathComponent == "新建 Markdown 文件 2.md", "悬空链接占用名称时递增")
+check((try? fm.destinationOfSymbolicLink(atPath: dangling.path)) != nil, "不覆盖悬空链接")
+let traversal = FileItemDefinition(id: "bad", name: "bad", title: "../escape", ext: "md", symbol: "doc")
+expectCreateError(.invalidDefinition, { try FileFactory.create(traversal, in: tmp, templatesDir: emptyTemplates) }, "拒绝跨目录文件名")
+let badExtension = FileItemDefinition(id: "bad", name: "bad", title: "example", ext: "../bad", symbol: "doc")
+expectCreateError(.invalidDefinition, { try FileFactory.create(badExtension, in: tmp, templatesDir: emptyTemplates) }, "拒绝跨目录扩展名")
+
+print("⑪ 自定义菜单稳定绑定")
+var registry = CustomMenuRegistry()
+let yaml = FileItemDefinition.custom("yaml")
+let toml = FileItemDefinition.custom("toml")
+let yamlTag = registry.tag(for: yaml)
+let tomlTag = registry.tag(for: toml)
+check(yamlTag != tomlTag, "不同类型的 tag 不同")
+check(registry.tag(for: toml) == tomlTag && registry.tag(for: yaml) == yamlTag, "设置重新排序后 tag 不变")
+check(registry.definition(for: yamlTag) == yaml, "旧菜单仍指向原类型")
+check(registry.definition(for: -1) == nil, "未知 tag 不分派动作")
+
+print("\n断言：\(assertions - failures)/\(assertions) 通过；失败：\(failures)")
 print(failures == 0 ? "\n🎉 全部通过" : "\n💥 \(failures) 项失败")
 exit(failures == 0 ? 0 : 1)
