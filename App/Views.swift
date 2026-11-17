@@ -28,7 +28,7 @@ struct ContentView: View {
                 .frame(width: 40, height: 40)
             VStack(alignment: .leading, spacing: 2) {
                 Text("OpenQuickDoc").font(.headline)
-                Text("Finder 右键新建文件 · 在编辑器中打开 · 拷贝路径")
+                Text("Finder 右键新建文件 · 在编辑器 / Pi 中打开 · 拷贝路径")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -110,7 +110,8 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Toggle("拷贝路径（多选时每行一个）", isOn: $settings.pathCopyEnabled)
                         Toggle("终端直达", isOn: $settings.terminalDirectEnabled)
-                        if settings.terminalDirectEnabled {
+                        Toggle("在 Pi 中打开", isOn: $settings.piDirectEnabled)
+                        if settings.terminalDirectEnabled || settings.piDirectEnabled {
                             Picker("终端：", selection: $settings.selectedTerminal) {
                                 ForEach(TerminalType.allCases) { t in
                                     Text(t.rawValue + (isInstalled([t.bundleIdentifier]) ? "" : "（未安装）")).tag(t)
@@ -118,6 +119,14 @@ struct ContentView: View {
                             }
                             .frame(maxWidth: 260)
                             .padding(.leading, 18)
+                        }
+                        if settings.piDirectEnabled {
+                            Text("右键文件夹或空白处 → 在终端中切换到该目录并运行 pi。需先安装 Pi CLI。")
+                                .font(.caption).foregroundColor(.secondary)
+                            if !settings.selectedTerminal.supportsPi {
+                                Text("Pi 启动使用系统终端；iTerm2 也支持。")
+                                    .font(.caption).foregroundColor(.secondary)
+                            }
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)

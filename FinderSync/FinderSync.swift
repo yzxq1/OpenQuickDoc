@@ -36,7 +36,7 @@ final class FinderSync: FIFinderSync {
     // MARK: - 工具栏
 
     override var toolbarItemName: String { "OpenQuickDoc" }
-    override var toolbarItemToolTip: String { "新建文件 / 在编辑器中打开 / 复制路径" }
+    override var toolbarItemToolTip: String { "新建文件 / 在编辑器或 Pi 中打开 / 复制路径" }
     override var toolbarItemImage: NSImage { symbol("doc.badge.plus") }
 
     // MARK: - 菜单
@@ -81,6 +81,9 @@ final class FinderSync: FIFinderSync {
             let t = settings.selectedTerminal
             let title = t == .terminal ? "在终端中打开" : "在 \(t.rawValue) 中打开"
             tools.append(makeItem(title, #selector(openTerminal(_:)), image: appIcon([t.bundleIdentifier]) ?? symbol("terminal")))
+        }
+        if settings.piDirectEnabled {
+            tools.append(makeItem("在 Pi 中打开", #selector(openPi(_:)), image: symbol("sparkles")))
         }
         if settings.pathCopyEnabled {
             tools.append(makeItem("复制当前路径", #selector(copyPath(_:)), image: symbol("doc.on.doc")))
@@ -192,13 +195,21 @@ final class FinderSync: FIFinderSync {
     }
 
     @objc private func openTerminal(_ sender: NSMenuItem) {
-        let terminal = AppSettings.load().selectedTerminal
-        // 终端只接受目录：选中文件时取其所在目录
+        launchTerminal(action: .shell)
+    }
+
+    @objc private func openPi(_ sender: NSMenuItem) {
+        launchTerminal(action: .pi)
+    }
+
+    private func launchTerminal(action: TerminalRequest.Action) {
+        let settings = AppSettings.load()
+        let terminal = action == .pi ? settings.piTerminal : settings.selectedTerminal
+        // 终端只接受目录：选中文件时取其所在目录。
         guard let dir = selectedOrCurrent.first.map({ isDirectory($0) ? $0 : $0.deletingLastPathComponent() }) else { return }
-        DiagnosticLog.write("请求在终端中打开")
-        // 终端收到文件夹不会 cd 过去（实测 iTerm2 只开在主目录），需要 AppleScript；
-        // 沙盒里不能发 Apple Events，所以交给主程序执行（见 TerminalRequest）。
-        guard let url = TerminalRequest(terminal: terminal, path: dir.path).url else { return }
+        DiagnosticLog.write(action == .pi ? "请求在 Pi 中打开" : "请求在终端中打开")
+        // 沙盒里不能发 Apple Events，交给主程序切换目录并执行固定动作。
+        guard let url = TerminalRequest(terminal: terminal, path: dir.path, action: action).url else { return }
         let config = NSWorkspace.OpenConfiguration()
         config.activates = false
         NSWorkspace.shared.open(url, configuration: config) { _, error in

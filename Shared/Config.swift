@@ -19,6 +19,9 @@ public enum TerminalType: String, Codable, CaseIterable, Identifiable {
         }
     }
 
+    /// 可通过 AppleScript 在新会话中执行命令的终端。
+    public var supportsPi: Bool { self == .terminal || self == .iterm2 }
+
     /// 兼容旧配置中已删除的取值（如 "VS Code"），未知值回落到系统终端
     public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
@@ -153,6 +156,7 @@ public struct AppSettings: Codable, Equatable {
     public var menuOrder: [String]
     public var pathCopyEnabled: Bool
     public var terminalDirectEnabled: Bool
+    public var piDirectEnabled: Bool
     public var openInVSCodeEnabled: Bool
     public var openInPyCharmEnabled: Bool
     public var selectedTerminal: TerminalType
@@ -166,6 +170,7 @@ public struct AppSettings: Codable, Equatable {
         menuOrder: FileItemDefinition.all.map(\.id),
         pathCopyEnabled: true,
         terminalDirectEnabled: true,
+        piDirectEnabled: true,
         openInVSCodeEnabled: true,
         openInPyCharmEnabled: true,
         selectedTerminal: .terminal,
@@ -175,7 +180,8 @@ public struct AppSettings: Codable, Equatable {
     )
 
     public init(enabledTypes: [String], menuOrder: [String], pathCopyEnabled: Bool,
-                terminalDirectEnabled: Bool, openInVSCodeEnabled: Bool, openInPyCharmEnabled: Bool,
+                terminalDirectEnabled: Bool, piDirectEnabled: Bool = true,
+                openInVSCodeEnabled: Bool, openInPyCharmEnabled: Bool,
                 selectedTerminal: TerminalType, useSubmenu: Bool, openFileAfterCreation: Bool,
                 customExtensions: [String]) {
         self.customExtensions = customExtensions
@@ -183,6 +189,7 @@ public struct AppSettings: Codable, Equatable {
         self.menuOrder = menuOrder
         self.pathCopyEnabled = pathCopyEnabled
         self.terminalDirectEnabled = terminalDirectEnabled
+        self.piDirectEnabled = piDirectEnabled
         self.openInVSCodeEnabled = openInVSCodeEnabled
         self.openInPyCharmEnabled = openInPyCharmEnabled
         self.selectedTerminal = selectedTerminal
@@ -199,6 +206,7 @@ public struct AppSettings: Codable, Equatable {
         menuOrder             = try c.decodeIfPresent([String].self, forKey: .menuOrder) ?? d.menuOrder
         pathCopyEnabled       = try c.decodeIfPresent(Bool.self, forKey: .pathCopyEnabled) ?? d.pathCopyEnabled
         terminalDirectEnabled = try c.decodeIfPresent(Bool.self, forKey: .terminalDirectEnabled) ?? d.terminalDirectEnabled
+        piDirectEnabled       = try c.decodeIfPresent(Bool.self, forKey: .piDirectEnabled) ?? d.piDirectEnabled
         openInVSCodeEnabled   = try c.decodeIfPresent(Bool.self, forKey: .openInVSCodeEnabled) ?? d.openInVSCodeEnabled
         openInPyCharmEnabled  = try c.decodeIfPresent(Bool.self, forKey: .openInPyCharmEnabled) ?? d.openInPyCharmEnabled
         selectedTerminal      = try c.decodeIfPresent(TerminalType.self, forKey: .selectedTerminal) ?? d.selectedTerminal
@@ -206,6 +214,11 @@ public struct AppSettings: Codable, Equatable {
         openFileAfterCreation = try c.decodeIfPresent(Bool.self, forKey: .openFileAfterCreation) ?? d.openFileAfterCreation
         customExtensions      = try c.decodeIfPresent([String].self, forKey: .customExtensions) ?? d.customExtensions
         normalize()
+    }
+
+    /// Warp / Ghostty 只支持打开目录，Pi 改用系统终端执行。
+    public var piTerminal: TerminalType {
+        selectedTerminal.supportsPi ? selectedTerminal : .terminal
     }
 
     /// 去掉未知 id，并把新增的类型补到排序末尾

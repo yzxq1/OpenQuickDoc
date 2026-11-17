@@ -30,6 +30,10 @@ check(s?.enabledTypes == ["md", "docx"], "保留用户的 enabledTypes")
 check(s?.useSubmenu == true, "保留用户的 useSubmenu")
 check(s?.selectedTerminal == .terminal, "已删除的终端值回落为系统终端")
 check(s?.openInVSCodeEnabled == AppSettings.defaults.openInVSCodeEnabled, "新增字段取默认值")
+check(s?.piDirectEnabled == true, "旧配置默认显示独立 Pi 菜单")
+let disabledPi = AppSettings.decode(Data(#"{"piDirectEnabled":false,"terminalDirectEnabled":true,"selectedTerminal":"iTerm2"}"#.utf8))!
+check(!disabledPi.piDirectEnabled && disabledPi.terminalDirectEnabled, "关闭 Pi 菜单不影响普通终端菜单")
+check(disabledPi.selectedTerminal == .iterm2, "保留旧配置选择的 iTerm2")
 check(s?.menuOrder.count == FileItemDefinition.all.count, "新增的文件类型被补进 menuOrder")
 check(s?.menuOrder.prefix(3) == ["md", "docx", "txt"], "保留用户原有排序")
 
@@ -37,6 +41,7 @@ print("③ 配置读写往返")
 let cfg = tmp.appendingPathComponent("settings.json")
 var s2 = AppSettings.defaults
 s2.enabledTypes = ["py"]; s2.selectedTerminal = .iterm2
+s2.piDirectEnabled = false
 s2.save(to: cfg)
 check(AppSettings.load(from: cfg) == s2, "save → load 结果一致")
 check(AppSettings.load(from: tmp.appendingPathComponent("nope.json")) == .defaults, "文件不存在时返回默认值（且不写盘）")
@@ -205,6 +210,73 @@ check(yamlTag != tomlTag, "不同类型的 tag 不同")
 check(registry.tag(for: toml) == tomlTag && registry.tag(for: yaml) == yamlTag, "设置重新排序后 tag 不变")
 check(registry.definition(for: yamlTag) == yaml, "旧菜单仍指向原类型")
 check(registry.definition(for: -1) == nil, "未知 tag 不分派动作")
+
+print("⑫ 独立 Pi 动作与兼容配置")
+for terminal in TerminalType.allCases {
+    var settings = AppSettings.defaults
+    settings.selectedTerminal = terminal
+    let expected: TerminalType = terminal.supportsPi ? terminal : .terminal
+    check(settings.piTerminal == expected, "\(terminal.rawValue): Pi 选择可执行命令的终端")
+    let request = TerminalRequest(terminal: terminal, path: weird, action: .pi)
+    if terminal.supportsPi {
+        check(request.url.flatMap(TerminalRequest.init(url:)) == request, "\(terminal.rawValue): Pi URL 保留动作与目录")
+        var error: NSDictionary?
+        check(NSAppleScript(source: request.appleScript!)!.compileAndReturnError(&error), "\(terminal.rawValue): Pi AppleScript 可编译")
+    } else {
+        check(request.url == nil && request.appleScript == nil, "\(terminal.rawValue): 拒绝不能执行 Pi 的请求")
+    }
+}
+let oldTerminalRequest = TerminalRequest(url: URL(string: validURL)!)!
+check(oldTerminalRequest.action == .shell, "旧 URL 只打开终端")
+check(URLComponents(url: oldTerminalRequest.url!, resolvingAgainstBaseURL: false)?.queryItems?.count == 2, "普通终端 URL 格式保持兼容")
+for suffix in ["&action=", "&action", "&action=python", "&action=pi%3Becho", "&action=pi&action=pi", "&action=pi&command=echo"] {
+    check(TerminalRequest(url: URL(string: validURL + suffix)!) == nil, "拒绝无效 Pi 动作 \(suffix)")
+}
+for scalar in [UInt32(0), 10, 13, 27, 0x2028] {
+    let request = TerminalRequest(terminal: .iterm2, path: "/tmp/" + String(UnicodeScalar(scalar)!), action: .pi)
+    check(request.url == nil && request.shellCommand == nil && request.appleScript == nil, "Pi 拒绝控制字符 U+\(String(scalar, radix: 16))")
+}
+
+print("⑬ 实际执行 Shell：进入准确目录后启动 Pi，cd 失败时不启动")
+let piTestRoot = tmp.appendingPathComponent("pi-launch")
+let piBin = piTestRoot.appendingPathComponent("bin")
+let piFolder = piTestRoot.appendingPathComponent(#"项目 it's "中文" \ $HOME; $(touch INJECTED) `touch BACKTICK` & (demo)"#)
+try! fm.createDirectory(at: piBin, withIntermediateDirectories: true)
+try! fm.createDirectory(at: piFolder, withIntermediateDirectories: true)
+let fakePi = piBin.appendingPathComponent("pi")
+try! "#!/bin/sh\nprintf '%s\\n' \"$PWD\" > \"$PI_TEST_OUTPUT\"\n".write(to: fakePi, atomically: true, encoding: .utf8)
+try! fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakePi.path)
+let piRequest = TerminalRequest(terminal: .iterm2, path: piFolder.path, action: .pi)
+let shellCommand = piRequest.shellCommand!
+var literalError: NSDictionary?
+let reflected = NSAppleScript(source: "return " + TerminalRequest.appleScriptLiteral(shellCommand))?.executeAndReturnError(&literalError)
+check(literalError == nil && reflected?.stringValue == shellCommand, "AppleScript 传递完整命令，保留引号与反斜杠")
+for shell in ["/bin/zsh", "/bin/bash"] {
+    let output = piTestRoot.appendingPathComponent(URL(fileURLWithPath: shell).lastPathComponent + ".txt")
+    var env = ProcessInfo.processInfo.environment
+    env["PATH"] = piBin.path + ":/usr/bin:/bin"
+    env["PI_TEST_OUTPUT"] = output.path
+    func runShell(_ command: String) -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: shell)
+        process.arguments = ["-f", "-c", command]
+        process.environment = env
+        process.currentDirectoryURL = piTestRoot
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try! process.run()
+        process.waitUntilExit()
+        return process.terminationStatus
+    }
+    check(runShell(shellCommand) == 0, "\(shell): Pi 启动命令执行成功")
+    let actual = (try? String(contentsOf: output, encoding: .utf8))?.trimmingCharacters(in: .newlines)
+    check(actual == piFolder.resolvingSymlinksInPath().path, "\(shell): Pi 实际工作目录与选中目录一致")
+    check(!fm.fileExists(atPath: piTestRoot.appendingPathComponent("INJECTED").path)
+          && !fm.fileExists(atPath: piTestRoot.appendingPathComponent("BACKTICK").path), "\(shell): 目录中的命令替换不会执行")
+    try! fm.removeItem(at: output)
+    let missing = TerminalRequest(terminal: .terminal, path: piTestRoot.appendingPathComponent("missing").path, action: .pi)
+    check(runShell(missing.shellCommand!) != 0 && !fm.fileExists(atPath: output.path), "\(shell): cd 失败后没有启动 Pi")
+}
 
 print("\n断言：\(assertions - failures)/\(assertions) 通过；失败：\(failures)")
 print(failures == 0 ? "\n🎉 全部通过" : "\n💥 \(failures) 项失败")
