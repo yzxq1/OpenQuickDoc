@@ -278,6 +278,21 @@ for shell in ["/bin/zsh", "/bin/bash"] {
     check(runShell(missing.shellCommand!) != 0 && !fm.fileExists(atPath: output.path), "\(shell): cd 失败后没有启动 Pi")
 }
 
+print("⑭ Finder 请求固定路由到配套主程序")
+for appPath in ["/Applications/OpenQuickDoc.app", "/tmp/项目 build/OpenQuickDoc.app", "/tmp/Renamed.app"] {
+    let application = URL(fileURLWithPath: appPath)
+    let extensionURL = application.appendingPathComponent("Contents/PlugIns/OpenQuickDocFinderSync.appex")
+    let route = TerminalLaunchRoute(request: piRequest, extensionURL: extensionURL)
+    check(route?.applicationURL.standardizedFileURL.path == application.standardizedFileURL.path, "\(appPath): 使用扩展所属的主程序")
+    check(route?.configuration.createsNewApplicationInstance == true, "\(appPath): 不复用同 Bundle ID 的旧进程")
+    check(route?.configuration.activates == false, "\(appPath): 由请求处理决定激活")
+    check((route?.url).flatMap(TerminalRequest.init(url:)) == piRequest, "\(appPath): 转发完整 Pi 动作与目录")
+}
+for path in ["/tmp/Other.bundle/Contents/PlugIns/Test.appex", "/tmp/OpenQuickDoc.app/Other/PlugIns/Test.appex", "/tmp/OpenQuickDoc.app/Contents/Other/Test.appex", "/tmp/Test.appex"] {
+    check(TerminalLaunchRoute(request: piRequest, extensionURL: URL(fileURLWithPath: path)) == nil, "拒绝无配套应用的扩展路径 \(path)")
+}
+check(TerminalLaunchRoute(request: piRequest, extensionURL: URL(string: "https://example.com/App.app/Contents/PlugIns/Test.appex")!) == nil, "拒绝网络扩展路径")
+
 print("\n断言：\(assertions - failures)/\(assertions) 通过；失败：\(failures)")
 print(failures == 0 ? "\n🎉 全部通过" : "\n💥 \(failures) 项失败")
 exit(failures == 0 ? 0 : 1)

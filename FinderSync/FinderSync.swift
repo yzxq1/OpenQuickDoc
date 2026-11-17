@@ -209,10 +209,14 @@ final class FinderSync: FIFinderSync {
         guard let dir = selectedOrCurrent.first.map({ isDirectory($0) ? $0 : $0.deletingLastPathComponent() }) else { return }
         DiagnosticLog.write(action == .pi ? "请求在 Pi 中打开" : "请求在终端中打开")
         // 沙盒里不能发 Apple Events，交给主程序切换目录并执行固定动作。
-        guard let url = TerminalRequest(terminal: terminal, path: dir.path, action: action).url else { return }
-        let config = NSWorkspace.OpenConfiguration()
-        config.activates = false
-        NSWorkspace.shared.open(url, configuration: config) { _, error in
+        let request = TerminalRequest(terminal: terminal, path: dir.path, action: action)
+        guard let route = TerminalLaunchRoute(request: request, extensionURL: bundle.bundleURL) else {
+            DiagnosticLog.write("无法定位配套主程序")
+            self.showAlert("无法定位 OpenQuickDoc 主程序，请重新安装应用。")
+            return
+        }
+        NSWorkspace.shared.open([route.url], withApplicationAt: route.applicationURL,
+                                configuration: route.configuration) { _, error in
             if let error {
                 DiagnosticLog.write("唤起主程序失败")
                 self.showAlert("唤起 OpenQuickDoc 失败：", detail: error.localizedDescription)
