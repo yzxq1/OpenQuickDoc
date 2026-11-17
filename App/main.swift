@@ -47,7 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    // MARK: - openquickdoc://open-terminal?app=…&path=…[&action=pi]
+    // MARK: - openquickdoc://open-terminal?app=…&path=…
 
     @objc private func handleGetURL(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
         receivedURL = true
@@ -78,19 +78,15 @@ enum TerminalLauncher {
         // 自定义 URL scheme 可由网页或其他应用调用，不能据此认定来自 Finder。
         // 每次明确确认后才向终端发送命令；默认按钮为取消。
         let confirm = NSAlert()
-        confirm.messageText = request.action == .pi
-            ? "在 \(request.terminal.rawValue) 中启动 Pi？"
-            : "在 \(request.terminal.rawValue) 中打开文件夹？"
-        let actionDetail = request.action == .pi ? "\n将切换到此目录并运行 pi。\n" : ""
-        confirm.informativeText = "目标：\(request.path)\n\(actionDetail)\n仅当这是你刚刚发起的操作时才继续。外部链接也能发起此请求。"
+        confirm.messageText = "在 \(request.terminal.rawValue) 中打开文件夹？"
+        confirm.informativeText = "目标：\(request.path)\n\n仅当这是你刚刚发起的操作时才继续。外部链接也能发起此请求。"
         confirm.addButton(withTitle: "取消")
-        confirm.addButton(withTitle: request.action == .pi ? "启动 Pi" : "打开")
+        confirm.addButton(withTitle: "打开")
         NSApp.activate(ignoringOtherApps: true)
         guard confirm.runModal() == .alertSecondButtonReturn else { return }
 
         guard let script = request.appleScript else {
-            // Warp / Ghostty：仅普通终端请求可以直接打开文件夹。
-            guard request.action == .shell else { return }
+            // Warp / Ghostty：直接把文件夹交给应用
             if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: request.terminal.bundleIdentifier) {
                 NSWorkspace.shared.open([dir], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
             }
